@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/juander/tcp-vote/internal/server"
+	"github.com/juander/udp-vote/internal/server"
 )
 
 func main() {
