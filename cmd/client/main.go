@@ -5,32 +5,31 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 )
 
 func main() {
-	// SYSCALL: socket() + connect() - cria socket TCP e estabelece conexão com servidor
-    // Kernel cria um file descriptor (FD) para rastrear este socket
-	conn, err := net.Dial("tcp", "localhost:9000")
+	conn, err := net.Dial("udp", "localhost:9000")
 	if err != nil {
 		fmt.Println("Erro ao conectar:", err)
 		return
 	}
 	defer conn.Close()
 
-	fmt.Println("Conectado ao servidor TCP!")
+	fmt.Println("Conectado ao servidor UDP!")
 
 	// Goroutine dedicada para leitura assíncrona
-	// Permite receber broadcasts enquanto o usuário digita
 	go func() {
-		scanner := bufio.NewScanner(conn)
-		// SYSCALL: read(fd, buffer, size) - bloqueante até dados chegarem
-		for scanner.Scan() {
-			fmt.Println("\n[SERVIDOR]:", scanner.Text())
+		for {
+			buffer := make([]byte, 1024)
+			n, _, err := conn.ReadFrom(buffer)
+			if err != nil {
+				fmt.Println("Erro ao ler do servidor:", err)
+				return
+			}
+			fmt.Println("\n[SERVIDOR]:", string(buffer[:n]))
 			fmt.Print(">> ")
 		}
-		// Servidor encerrou conexão (close do FD remoto)
-		fmt.Println("\nConexão com o servidor encerrada.")
-		os.Exit(0)
 	}()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -39,17 +38,23 @@ func main() {
 	fmt.Print("Digite seu NOME para entrar: ")
 	scanner.Scan()
 	id := scanner.Text()
-	
-	// SYSCALL: write(fd, buffer, len) - escreve no socket TCP usando seu FD
+
+	// Envia o nome do cliente
 	fmt.Fprintf(conn, "%s\n", id)
 
-	// Loop de envio de comandos
+	// Loop de envio de votos
 	for {
-		fmt.Print(">> ")
+		fmt.Print("Digite seu VOTO (A, B, C) ou 'sair' para encerrar: ")
 		if !scanner.Scan() {
 			break
 		}
 		text := scanner.Text()
+		if text == "sair" {
+			break
+		}
 		fmt.Fprintf(conn, "%s\n", text)
+		time.Sleep(100 * time.Millisecond) // Simula um atraso entre os votos
 	}
+
+	fmt.Println("Encerrando cliente.")
 }

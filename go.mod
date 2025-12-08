@@ -1,3 +1,3 @@
-module github.com/yLukas077/tcp-vote
+module github.com/yourusername/udp-vote
 
 go 1.21

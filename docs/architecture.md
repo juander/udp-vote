@@ -1,6 +1,6 @@
-# Arquitetura do Sistema TCP-Vote ß
+# Arquitetura do Sistema UDP-Vote
 
-Este documento apresenta uma visão clara, direta e essencial da arquitetura do servidor de votação TCP concorrente desenvolvido em Go. Ele resume como o sistema funciona, seus componentes principais e o fluxo geral de comunicação.
+Este documento apresenta uma visão clara e concisa da arquitetura do servidor de votação UDP desenvolvido em Go. Ele resume como o sistema funciona, seus componentes principais e o fluxo geral de comunicação.
 
 ---
 
@@ -11,14 +11,14 @@ Este documento apresenta uma visão clara, direta e essencial da arquitetura do 
 │                           CLIENTES                           │
 │   Client 1   Client 2   Client 3   ...   Client N            │
 └─────────────────────────────────────────────────────────────┘
-                              │ TCP/IP
+                              │ UDP
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                     SERVIDOR (Port 9000)                     │
 │                                                             │
 │  Main Goroutine                                              │
-│  └── listener.Accept()                                       │
-│        └── go handleClient(conn)                             │
+│  └── listenAndServe()                                       │
+│        └── go handleVote(packet)                            │
 │                                                             │
 │  Cada cliente → 1 goroutine própria                          │
 │                                                             │
@@ -28,8 +28,7 @@ Este documento apresenta uma visão clara, direta e essencial da arquitetura do 
 │    - voteCounts: contagem global                             │
 │                                                             │
 │  Broadcast:                                                  │
-│    - Modo Sync (bloqueante)                                  │
-│    - Modo Async (channel + worker dedicado)                  │
+│    - Envio de status atual para todos os clientes           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -39,15 +38,10 @@ Este documento apresenta uma visão clara, direta e essencial da arquitetura do 
 
 ### 1. Conexão do Cliente
 
-* Cliente realiza o handshake TCP.
-* Servidor recebe via `Accept()` e cria uma nova goroutine para tratá-lo.
+* Cliente envia seu identificador ao servidor.
+* Servidor registra o cliente e aguarda votos.
 
-### 2. Registro
-
-* Cliente envia seu identificador.
-* Servidor armazena o ID no mapa de clientes (mutex).
-
-### 3. Votação
+### 2. Votação
 
 * Cliente envia: `VOTE X`
 * Servidor:
@@ -56,12 +50,9 @@ Este documento apresenta uma visão clara, direta e essencial da arquitetura do 
   * Atualiza mapas protegidos.
   * Dispara broadcast com o estado atualizado.
 
-### 4. Broadcast
+### 3. Broadcast
 
-* Pode ser:
-
-  * **Sync**: envio dentro do mutex (bloqueante, pode travar).
-  * **Async**: snapshot enviado para worker em canal (não trava votações).
+* O servidor envia atualizações de votação para todos os clientes conectados.
 
 ---
 
@@ -69,16 +60,15 @@ Este documento apresenta uma visão clara, direta e essencial da arquitetura do 
 
 ### Goroutines principais
 
-* **Main Goroutine** → Aceita conexões.
-* **N Client Goroutines** → Uma goroutine por cliente.
-* **Broadcast Worker (Async)** → Envia mensagens sem bloquear votações.
+* **Main Goroutine** → Escuta pacotes UDP.
+* **N Client Goroutines** → Uma goroutine por cliente para processar votos.
 
 ### Estrutura protegida por mutex
 
 ```
 Server {
   mu          sync.Mutex
-  clients     map[string]net.Conn
+  clients     map[string]net.UDPAddr
   votes       map[string]string
   voteCounts  map[string]int
 }
@@ -87,34 +77,20 @@ Server {
 ### Padrão de Acesso
 
 * Todas as leituras/escritas nos mapas ocorrem dentro de `mu.Lock()` / `mu.Unlock()`.
-* No modo async, o mutex é liberado rapidamente (< 1 ms).
 
 ---
 
-## 📡 Broadcast: Sync vs Async (Resumo)
+## 📡 Broadcast e Problemas de Buffer
 
-### Sync (Bloqueante)
+### Problemas de Buffer
 
-* Envia mensagens dentro do mutex.
-* Se um cliente for lento → trava todos.
-* Baixo throughput.
+* O uso de UDP pode levar a problemas de "Ghost Vote", onde votos podem ser enviados, mas não recebidos pelo servidor devido à perda de pacotes.
+* O servidor deve lidar com a possibilidade de votos duplicados ou perdidos.
 
-**Importante:** Apenas clientes que **já votaram** recebem broadcasts. Isso é implementado pela verificação:
+### Comparação com TCP
 
-```go
-for id, conn := range s.clients {
-    if _, votou := s.votes[id]; votou {  // ← Filtro crítico
-        conn.Write(msgBytes)
-    }
-}
-```
-
-### Async (Recomendado)
-
-* Captura do snapshot sob mutex.
-* Envia snapshot para canal.
-* Worker faz o broadcast fora do mutex.
-* Clientes lentos não afetam o processamento do voto.
+* Ao contrário do TCP, que garante a entrega de pacotes, o UDP não possui controle de fluxo, o que pode resultar em votos não contabilizados.
+* O servidor deve implementar lógica para lidar com a inconsistência dos votos recebidos.
 
 ---
 
@@ -133,28 +109,15 @@ DISCONNECTED → CONNECTED → REGISTERED → VOTED → DISCONNECTED
 
 ### 1. Listener (Main Goroutine)
 
-Aceita conexões e inicia goroutines de cliente.
+Escuta pacotes UDP e inicia goroutines para processar votos.
 
-### 2. Client Handler
-
-Responsável por:
-
-* Registrar ID
-* Ler comandos
-* Invocar processamento de voto
-* Fazer cleanup ao desconectar
-
-### 3. Processador de Voto
+### 2. Processador de Voto
 
 Realiza:
 
-* Validação da opção
-* Atualização de `votes` e `voteCounts`
-* Disparo do broadcast (sync ou async)
-
-### 4. Broadcast Worker (modo async)
-
-Envia atualizações para todos os clientes de forma desacoplada.
+* Validação da opção.
+* Atualização de `votes` e `voteCounts`.
+* Disparo do broadcast.
 
 ---
 
@@ -162,17 +125,15 @@ Envia atualizações para todos os clientes de forma desacoplada.
 
 * **Goroutine-per-connection**: simples e altamente escalável.
 * **Mutex apenas para memória**, nunca para operações de rede.
-* **Channels para desacoplamento** entre etapas rápidas e lentas.
-* **Snapshot pattern** para garantir segurança e não bloquear o sistema.
+* **Mecanismos para lidar com perda de pacotes** e garantir a integridade dos votos.
 * **I/O assíncrono** para máxima escalabilidade.
 
 ---
 
 ## 📊 Resumo de Performance
 
-| Métrica                    | Sync  | Async      |
-| -------------------------- | ----- | ---------- |
-| Bloqueio no mutex          | Alto  | Quase zero |
-| Throughput                 | Baixo | Altíssimo  |
-| Cliente lento afeta todos? | Sim   | Não        |
-| Escalabilidade             | Ruim  | Excelente  |
+| Métrica                    | UDP                      |
+| -------------------------- | ----------------------- |
+| Garantia de entrega        | Não                     |
+| Possibilidade de "Ghost Vote" | Alta                  |
+| Escalabilidade             | Excelente               |

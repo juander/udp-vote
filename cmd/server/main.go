@@ -3,10 +3,11 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"time"
 
-	"github.com/yLukas077/tcp-vote/internal/server"
+	"github.com/yLukas077/udp-vote/internal/server"
 )
 
 func main() {
@@ -18,20 +19,18 @@ func main() {
 	defer logFile.Close()
 	log.SetOutput(logFile)
 
-	fmt.Println("=== SERVIDOR TCP DE VOTAÇÃO ===")
+	fmt.Println("=== SERVIDOR UDP DE VOTAÇÃO ===")
 	fmt.Println("Logs: logs/server.log")
-	fmt.Println("Modo: Assíncrono (Chanells + Worker)")
+	fmt.Println("Modo: Assíncrono (Canal + Worker)")
 
-	// Opções de voto configuráveis
-	opcoes := []string{"A", "B", "C"}
-	// Inicia servidor em modo assíncrono (true = non-blocking broadcast)
-	srv := server.NewServer(false, opcoes)
+	// Inicia servidor UDP
+	srv := server.NewServer()
 
 	// Inicia votação após 5 segundos com duração de 60 segundos
 	go func() {
 		time.Sleep(5 * time.Second)
-		fmt.Println("Iniciando votação (300 segundos)...")
-		srv.StartVoting(300)
+		fmt.Println("Iniciando votação (60 segundos)...")
+		srv.StartVoting(60)
 	}()
 
 	srv.Start(":9000")
