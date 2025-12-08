@@ -196,47 +196,6 @@ func (s *UDPServer) handleVote(clientID, option string, addr *net.UDPAddr) {
 	}
 }
 
-// broadcastSync envia broadcast de forma bloqueante (demonstra problema de buffer).
-func (s *UDPServer) broadcastSync() {
-	s.broadcastSeq++
-
-	// CRIA PAYLOAD GRANDE (256KB) para encher buffer UDP rapidamente
-	// Isso demonstra: clientes lentos terão buffer cheio e SO descartará pacotes
-	padding := make([]byte, 256*1024)
-	for i := range padding {
-		padding[i] = byte(i % 256)
-	}
-
-	msg := Message{
-		Type:       "BROADCAST",
-		VoteCounts: s.voteCounts,
-		SeqNum:     s.broadcastSeq,
-		Message:    string(padding), // Payload grande
-	}
-
-	data, _ := json.Marshal(msg)
-
-	log.Printf("[SYNC BROADCAST #%d] Enviando %d KB para %d clientes",
-		s.broadcastSeq, len(data)/1024, len(s.votes))
-
-	for id := range s.votes {
-		if addr, ok := s.clients[id]; ok {
-			// SYSCALL: sendto(fd, data, len, flags, &dest_addr, addr_len)
-			// UDP não bloqueia por "cliente lento" - mas SO pode descartar
-			// se buffer do receptor estiver cheio (SEM NOTIFICAR O SENDER!)
-			_, err := s.conn.WriteToUDP(data, addr)
-			if err != nil {
-				log.Printf("Erro ao enviar para %s: %v", id, err)
-			}
-		}
-	}
-}
-
-// broadcastAsync envia broadcast via worker (não bloqueia votações).
-func (s *UDPServer) broadcastAsync() {
-	s.broadcastSeq++
-
-	snapshot := make(map[string]int)
 // broadcastSync envia broadcast bloqueante.
 func (s *UDPServer) broadcastSync() {
 	s.broadcastSeq++
@@ -248,6 +207,35 @@ func (s *UDPServer) broadcastSync() {
 		Type:       "BROADCAST",
 		VoteCounts: s.voteCounts,
 		SeqNum:     s.broadcastSeq,
+		Message:    string(padding),
+	}
+
+	data, _ := json.Marshal(msg)
+
+	for id := range s.votes {
+		if addr, ok := s.clients[id]; ok {
+			// SYSCALL: sendto() - não bloqueia, SO descarta se buffer cheio
+			s.conn.WriteToUDP(data, addr)
+		}
+	}
+}
+
+// broadcastAsync envia broadcast via worker.
+func (s *UDPServer) broadcastAsync() {
+	s.broadcastSeq++
+
+	snapshot := make(map[string]int)
+	for k, v := range s.voteCounts {
+		snapshot[k] = v
+	}
+
+	select {
+	case s.broadcastChan <- BroadcastUpdate{VoteCounts: snapshot, SeqNum: s.broadcastSeq}:
+	default:
+		log.Println("Canal de broadcast cheio")
+	}
+}
+
 // broadcastWorker processa broadcasts assíncronos.
 func (s *UDPServer) broadcastWorker() {
 	for update := range s.broadcastChan {
@@ -275,6 +263,8 @@ func (s *UDPServer) broadcastWorker() {
 			s.conn.WriteToUDP(data, addr)
 		}
 	}
+}
+
 // sendMessage envia mensagem JSON.
 func (s *UDPServer) sendMessage(addr *net.UDPAddr, msg Message) {
 	data, err := json.Marshal(msg)
@@ -285,13 +275,7 @@ func (s *UDPServer) sendMessage(addr *net.UDPAddr, msg Message) {
 	// SYSCALL: sendto() - retorna imediatamente, não espera ACK
 	s.conn.WriteToUDP(data, addr)
 }
-	s.votingState = VotingActive
-	s.votingDeadline = time.Now().Add(time.Duration(durationSeconds) * time.Second)
 
-	log.Printf("🗳 VOTAÇÃO INICIADA - Duração: %ds", durationSeconds)
-
-	// Notifica todos os clientes registrados
-	announcement := Message{
 // StartVoting inicia votação.
 func (s *UDPServer) StartVoting(durationSeconds int) {
 	s.mu.Lock()
