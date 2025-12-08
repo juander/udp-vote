@@ -1,3 +1,3 @@
-module github.com/yourusername/udp-vote
+module github.com/juander/udp-vote
 
 go 1.21
