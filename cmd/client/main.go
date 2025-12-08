@@ -20,157 +20,115 @@ type Message struct {
 	SeqNum     int            `json:"seq_num,omitempty"`
 }
 
-type ClientStats struct {
-	mu                sync.Mutex
-	votesSent         int
-	votesConfirmed    int
-	broadcastsReceived int
-	lastSeqNum        int
-	packetsLost       int
+type Stats struct {
+	m sync.Mutex
+
+	sent       int
+	confirmed  int
+	broadcasts int
+	lost       int
+	lastSeq    int
 }
 
-func (s *ClientStats) PrintStats() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	
-	fmt.Println("\n--- Estatísticas UDP ---")
-	fmt.Printf("Votos enviados:     %d\n", s.votesSent)
-	fmt.Printf("Votos confirmados:  %d\n", s.votesConfirmed)
-	
-	if s.votesSent > s.votesConfirmed {
-		fmt.Printf("Votos fantasma:     %d\n", s.votesSent-s.votesConfirmed)
+func (s *Stats) addVote()    { s.m.Lock(); s.sent++; s.m.Unlock() }
+func (s *Stats) confirm()    { s.m.Lock(); s.confirmed++; s.m.Unlock() }
+func (s *Stats) addBroadcast(){ s.m.Lock(); s.broadcasts++; s.m.Unlock() }
+
+func (s *Stats) seqCheck(n int) {
+	s.m.Lock()
+	if s.lastSeq > 0 && n > s.lastSeq+1 {
+		s.lost += n - s.lastSeq - 1
 	}
-	
-	fmt.Printf("Broadcasts:         %d\n", s.broadcastsReceived)
-	fmt.Printf("Packets perdidos:   %d\n", s.packetsLost)
-	
-	if s.packetsLost > 0 {
-		loss := float64(s.packetsLost) / float64(s.broadcastsReceived+s.packetsLost) * 100
-		fmt.Printf("Taxa de perda:      %.1f%%\n", loss)
+	s.lastSeq = n
+	s.m.Unlock()
+}
+
+func (s *Stats) Print() {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	fmt.Println("\n===== UDP STATS =====")
+	fmt.Println("Votos enviados:", s.sent)
+	fmt.Println("Confirmados   :", s.confirmed)
+	fmt.Println("Não confirm. :", s.sent-s.confirmed)
+	fmt.Println("Broadcasts   :", s.broadcasts)
+	fmt.Println("Pacotes perd.:", s.lost)
+
+	total := s.broadcasts + s.lost
+	if total > 0 {
+		fmt.Printf("Perda estimada: %.2f%%\n", float64(s.lost)/float64(total)*100)
 	}
-	fmt.Println()
+	fmt.Println("=====================\n")
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Uso: ./client <nome>")
+		fmt.Println("Uso: go run client.go <nome>")
 		return
 	}
+	name := os.Args[1]
+	stats := &Stats{}
 
-	clientID := os.Args[1]
-	stats := &ClientStats{}
-
-	// SYSCALL: socket(AF_INET, SOCK_DGRAM, 0)
-	conn, err := net.Dial("udp", "localhost:9000")
-	if err != nil {
-		fmt.Println("Erro:", err)
-		return
-	}
+	conn, _ := net.Dial("udp", "localhost:9000")
 	defer conn.Close()
 
-	fmt.Println("Conectado ao servidor UDP")
-	go receiveMessages(conn, stats)
+	go listen(conn, stats)
 
-	sendMessage(conn, Message{Type: "REGISTER", ClientID: clientID})
+	send(conn, "REGISTER", name, "")
+	fmt.Println("Conectado. Use: VOTE A | STATS | QUIT")
 
-	scanner := bufio.NewScanner(os.Stdin)
-
+	input := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print(">> ")
-		if !scanner.Scan() {
-			break
-		}
+		input.Scan()
+		cmd := input.Text()
 
-		text := strings.TrimSpace(scanner.Text())
+		switch {
+		case cmd == "STATS":
+			stats.Print()
 
-		if text == "QUIT" {
-			stats.PrintStats()
-			break
-		}
+		case cmd == "QUIT":
+			stats.Print()
+			return
 
-		if text == "STATS" {
-			stats.PrintStats()
-			continue
-		}
+		case strings.HasPrefix(cmd, "VOTE "):
+			option := strings.TrimPrefix(cmd, "VOTE ")
+			stats.addVote()
+			send(conn, "VOTE", name, option)
 
-		if strings.HasPrefix(text, "VOTE ") {
-			option := strings.TrimPrefix(text, "VOTE ")
-			
-			stats.mu.Lock()
-			stats.votesSent++
-			stats.mu.Unlock()
-			
-			sendMessage(conn, Message{
-				Type:       "VOTE",
-				ClientID:   clientID,
-				VoteOption: option,
-			})
-			continue
+		default:
+			fmt.Println("Comandos: VOTE <X>, STATS, QUIT")
 		}
 	}
 }
 
-func receiveMessages(conn net.Conn, stats *ClientStats) {
-	buffer := make([]byte, 65536)
-
+func listen(conn net.Conn, stats *Stats) {
+	buf := make([]byte, 4096)
 	for {
 		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-		
-		n, err := conn.Read(buffer)
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
-			}
-			return
-		}
+		n, err := conn.Read(buf)
+		if err != nil { continue }
 
 		var msg Message
-		if json.Unmarshal(buffer[:n], &msg) != nil {
-			continue
-		}
+		if json.Unmarshal(buf[:n], &msg) != nil { continue }
 
-		stats.mu.Lock()
 		switch msg.Type {
 		case "ACK":
-			if strings.Contains(msg.Message, "Voto") {
-				stats.votesConfirmed++
-			}
-			stats.mu.Unlock()
-			fmt.Printf("\n[ACK] %s\n>> ", msg.Message)
+			stats.confirm()
+			fmt.Printf("\n[OK] %s\n>> ", msg.Message)
 
 		case "ERROR":
-			stats.mu.Unlock()
 			fmt.Printf("\n[ERRO] %s\n>> ", msg.Message)
 
 		case "BROADCAST":
-			stats.broadcastsReceived++
-			
-			if stats.lastSeqNum > 0 && msg.SeqNum > stats.lastSeqNum+1 {
-				gap := msg.SeqNum - stats.lastSeqNum - 1
-				stats.packetsLost += gap
-				stats.mu.Unlock()
-				fmt.Printf("\n[GAP] %d packets perdidos (seq %d -> %d)\n>> ",
-					gap, stats.lastSeqNum, msg.SeqNum)
-			} else {
-				stats.mu.Unlock()
-			}
-			
-			stats.mu.Lock()
-			stats.lastSeqNum = msg.SeqNum
-			stats.mu.Unlock()
-			
-			if msg.VoteCounts != nil {
-				fmt.Printf("\n[#%d] %v\n>> ", msg.SeqNum, msg.VoteCounts)
-			}
-
-		default:
-			stats.mu.Unlock()
+			stats.addBroadcast()
+			stats.seqCheck(msg.SeqNum)
+			fmt.Printf("\n📡 Parcial #%d %v\n>> ", msg.SeqNum, msg.VoteCounts)
 		}
 	}
 }
 
-func sendMessage(conn net.Conn, msg Message) {
-	data, _ := json.Marshal(msg)
-	// SYSCALL: sendto() - retorna imediatamente
-	conn.Write(data)
+func send(c net.Conn, t, id, opt string) {
+	data,_ := json.Marshal(Message{Type:t, ClientID:id, VoteOption:opt})
+	c.Write(data)
 }
