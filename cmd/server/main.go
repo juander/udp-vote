@@ -31,7 +31,7 @@ func main() {
 	// Inicia votação automaticamente após 5 segundos
 	go func() {
 		time.Sleep(5 * time.Second)
-		fmt.Println("📢 Iniciando votação (300s)...")
+		fmt.Println("Iniciando votação (300s)...")
 		srv.StartVoting(300)
 	}()
 

@@ -9,6 +9,7 @@ import (
 )
 
 // =============== Estruturas comuns ao cliente/servidor ================
+
 type Message struct {
 	Type       string         `json:"type"`
 	ClientID   string         `json:"client_id"`
@@ -19,6 +20,7 @@ type Message struct {
 }
 
 // ============================ Estatísticas ============================
+
 type Stats struct {
 	m             sync.Mutex
 	sent          int
@@ -26,7 +28,7 @@ type Stats struct {
 	broadcastRecv int
 	lost          int
 	lastSeq       int
-	broadcastFail int // novo: conta broadcasts não recebidos
+	broadcastFail int
 }
 
 func (s *Stats) AddSent()          { s.m.Lock(); s.sent++; s.m.Unlock() }
@@ -59,6 +61,7 @@ func (s *Stats) Print() {
 	if total > 0 {
 		fmt.Printf("Perda estimada:      %.2f%%\n", float64(s.lost)/float64(total)*100)
 	}
+
 	fmt.Println("==============================\n")
 }
 
@@ -66,8 +69,8 @@ func (s *Stats) Print() {
 
 func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	defer wg.Done()
-
 	clientID := fmt.Sprintf("FAST_%d", id)
+
 	conn, err := net.Dial("udp", "localhost:9000")
 	if err != nil {
 		fmt.Printf("[FAST_%d] erro ao conectar\n", id)
@@ -75,7 +78,6 @@ func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	}
 	defer conn.Close()
 
-	// Espera ACK de registro antes de votar
 	ackCh := make(chan struct{})
 	go func() {
 		buf := make([]byte, 2048)
@@ -95,6 +97,7 @@ func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 			}
 		}
 	}()
+
 	send(conn, "REGISTER", clientID, "")
 	select {
 	case <-ackCh:
@@ -107,10 +110,10 @@ func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	stats.AddSent()
 	send(conn, "VOTE", clientID, "A")
 
-	// Lê broadcasts por 10s
 	broadcasts := make(map[int]bool)
 	end := time.Now().Add(10 * time.Second)
 	buf := make([]byte, 4096)
+
 	for time.Now().Before(end) {
 		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		n, err := conn.Read(buf)
@@ -132,7 +135,7 @@ func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 			broadcasts[msg.SeqNum] = true
 		}
 	}
-	// Checa se recebeu pelo menos 1 broadcast
+
 	if len(broadcasts) == 0 {
 		stats.AddBroadcastFail()
 		fmt.Printf("[FAST_%d] não recebeu nenhum broadcast!\n", id)
@@ -141,8 +144,8 @@ func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 
 func slowClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	defer wg.Done()
-
 	clientID := fmt.Sprintf("SLOW_%d", id)
+
 	conn, err := net.Dial("udp", "localhost:9000")
 	if err != nil {
 		fmt.Printf("[SLOW_%d] erro ao conectar\n", id)
@@ -150,7 +153,6 @@ func slowClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	}
 	defer conn.Close()
 
-	// Espera ACK de registro antes de votar
 	ackCh := make(chan struct{})
 	go func() {
 		buf := make([]byte, 2048)
@@ -170,6 +172,7 @@ func slowClient(id int, stats *Stats, wg *sync.WaitGroup) {
 			}
 		}
 	}()
+
 	send(conn, "REGISTER", clientID, "")
 	select {
 	case <-ackCh:
@@ -182,25 +185,26 @@ func slowClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	stats.AddSent()
 	send(conn, "VOTE", clientID, "B")
 
-	// Lê apenas uma resposta e "morre"
 	buffer := make([]byte, 2048)
 	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	n, _ := conn.Read(buffer)
+
 	var msg Message
 	if json.Unmarshal(buffer[:n], &msg) == nil && msg.Type == "ACK" && msg.Message == "Voto registrado" {
 		stats.AddConfirm()
 	}
+
 	fmt.Printf("[SLOW_%d] desconectou (gerando perda)\n", id)
 	time.Sleep(10 * time.Second)
 }
 
-// envia pacote UDP
 func send(conn net.Conn, t, id, vote string) {
 	data, _ := json.Marshal(Message{Type: t, ClientID: id, VoteOption: vote})
 	conn.Write(data)
 }
 
 // =========================== MAIN TEST ================================
+
 func main() {
 	stats := &Stats{}
 	var wg sync.WaitGroup
@@ -208,9 +212,9 @@ func main() {
 	fmt.Println("==== TESTE UDP ====")
 	fmt.Println("FAST → recebe broadcast")
 	fmt.Println("SLOW → desconecta e causa perda")
+
 	time.Sleep(1 * time.Second)
 
-	// clientes lentos causam perda
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go slowClient(i, stats, &wg)
@@ -218,7 +222,6 @@ func main() {
 
 	time.Sleep(500 * time.Millisecond)
 
-	// carga real
 	for i := 0; i < 25; i++ {
 		wg.Add(1)
 		go fastClient(i, stats, &wg)

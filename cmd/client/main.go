@@ -19,6 +19,7 @@ type Message struct {
 	Message    string         `json:"message,omitempty"`
 	VoteCounts map[string]int `json:"vote_counts,omitempty"`
 	SeqNum     int            `json:"seq_num,omitempty"`
+	Options    []string       `json:"options,omitempty"`
 }
 
 // Estatísticas locais do cliente (para medir UDP)
@@ -95,6 +96,9 @@ func main() {
 			}
 			switch msg.Type {
 			case "ACK":
+				if len(msg.Options) > 0 {
+					fmt.Printf("\nOpções de voto disponíveis: %v\n", msg.Options)
+				}
 				if msg.Message == "Voto registrado" {
 					stats.confirm()
 				}

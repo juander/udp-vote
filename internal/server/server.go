@@ -27,6 +27,8 @@ type UDPServer struct {
 	// key = opção, value = quantidade de votos
 	voteCounts map[string]int
 
+	options []string
+
 	// Controle do estado da votação
 	votingState    VotingState // NotStarted / Active / Ended
 	votingDeadline time.Time   // hora em que a votação termina
@@ -48,6 +50,7 @@ func NewUDPServer(options []string) *UDPServer {
 		voteCounts:    make(map[string]int),
 		votingState:   VotingNotStarted,
 		broadcastChan: make(chan BroadcastUpdate, 200), // canal com buffer grande
+		options:       options,
 	}
 
 	// Inicializa contadores das opções
@@ -92,8 +95,7 @@ func (s *UDPServer) Start(port string) {
 		// Cria uma cópia do pacote recebido
 		data := make([]byte, n)
 		copy(data, buffer[:n])
-		// Pacote tratado de forma assíncrona (não bloqueia leitura)
-		go s.handlePacket(buffer[:n], clientAddr)
+		go s.handlePacket(data, clientAddr)
 	}
 }
 
@@ -137,7 +139,11 @@ func (s *UDPServer) registerClient(id string, addr *net.UDPAddr) {
 	log.Printf("[JOIN] %s (%s)", id, addr)
 
 	// Mensagem padrão
-	msg := Message{Type: "ACK", Message: "Aguardando início da votação"}
+	msg := Message{
+		Type:    "ACK",
+		Message: "Aguardando início da votação",
+		Options: s.options,
+	}
 
 	// Se já estiver rolando votação, informa tempo restante
 	if s.votingState == VotingActive {

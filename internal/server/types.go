@@ -23,6 +23,7 @@ type Message struct {
 	Message    string         `json:"message,omitempty"`     // Respostas do servidor (ACK/ERROR)
 	VoteCounts map[string]int `json:"vote_counts,omitempty"` // Usado apenas em BROADCAST
 	SeqNum     int            `json:"seq_num,omitempty"`     // Para rastrear perda UDP
+	Options    []string       `json:"options,omitempty"`     // Para enviar opções
 }
 
 // ----------------------------------------------------------
