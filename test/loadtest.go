@@ -67,13 +67,13 @@ func (s *Stats) Print() {
 
 // ========================= Clientes de Teste ==========================
 
-func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
+func activeClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	defer wg.Done()
-	clientID := fmt.Sprintf("FAST_%d", id)
+	clientID := fmt.Sprintf("ACTIVE_%d", id)
 
 	conn, err := net.Dial("udp", "localhost:9000")
 	if err != nil {
-		fmt.Printf("[FAST_%d] erro ao conectar\n", id)
+		fmt.Printf("[ACTIVE_%d] erro ao conectar\n", id)
 		return
 	}
 	defer conn.Close()
@@ -102,7 +102,7 @@ func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	select {
 	case <-ackCh:
 	case <-time.After(2 * time.Second):
-		fmt.Printf("[FAST_%d] não recebeu ACK de registro\n", id)
+		fmt.Printf("[ACTIVE_%d] não recebeu ACK de registro\n", id)
 		return
 	}
 
@@ -138,17 +138,17 @@ func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 
 	if len(broadcasts) == 0 {
 		stats.AddBroadcastFail()
-		fmt.Printf("[FAST_%d] não recebeu nenhum broadcast!\n", id)
+		fmt.Printf("[ACTIVE_%d] não recebeu nenhum broadcast!\n", id)
 	}
 }
 
-func slowClient(id int, stats *Stats, wg *sync.WaitGroup) {
+func inactiveClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	defer wg.Done()
-	clientID := fmt.Sprintf("SLOW_%d", id)
+	clientID := fmt.Sprintf("INACTIVE_%d", id)
 
 	conn, err := net.Dial("udp", "localhost:9000")
 	if err != nil {
-		fmt.Printf("[SLOW_%d] erro ao conectar\n", id)
+		fmt.Printf("[INACTIVE_%d] erro ao conectar\n", id)
 		return
 	}
 	defer conn.Close()
@@ -177,7 +177,7 @@ func slowClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	select {
 	case <-ackCh:
 	case <-time.After(2 * time.Second):
-		fmt.Printf("[SLOW_%d] não recebeu ACK de registro\n", id)
+		fmt.Printf("[INACTIVE_%d] não recebeu ACK de registro\n", id)
 		return
 	}
 
@@ -194,7 +194,7 @@ func slowClient(id int, stats *Stats, wg *sync.WaitGroup) {
 		stats.AddConfirm()
 	}
 
-	fmt.Printf("[SLOW_%d] desconectou (gerando perda)\n", id)
+	fmt.Printf("[INACTIVE_%d] cliente ficou inativo (não recebe mais mensagens)\n", id)
 	time.Sleep(10 * time.Second)
 }
 
@@ -210,21 +210,21 @@ func main() {
 	var wg sync.WaitGroup
 
 	fmt.Println("==== TESTE UDP ====")
-	fmt.Println("FAST → recebe broadcast")
-	fmt.Println("SLOW → desconecta e causa perda")
+	fmt.Println("ACTIVE → recebe broadcast")
+	fmt.Println("INACTIVE → desconecta e não recebe broadcast")
 
 	time.Sleep(1 * time.Second)
 
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
-		go slowClient(i, stats, &wg)
+		go inactiveClient(i, stats, &wg)
 	}
 
 	time.Sleep(500 * time.Millisecond)
 
 	for i := 0; i < 25; i++ {
 		wg.Add(1)
-		go fastClient(i, stats, &wg)
+		go activeClient(i, stats, &wg)
 		time.Sleep(20 * time.Millisecond)
 	}
 
