@@ -26,11 +26,13 @@ type Stats struct {
 	broadcastRecv int
 	lost          int
 	lastSeq       int
+	broadcastFail int // novo: conta broadcasts não recebidos
 }
 
-func (s *Stats) AddSent()      { s.m.Lock(); s.sent++; s.m.Unlock() }
-func (s *Stats) AddConfirm()   { s.m.Lock(); s.confirmed++; s.m.Unlock() }
-func (s *Stats) AddBroadcast() { s.m.Lock(); s.broadcastRecv++; s.m.Unlock() }
+func (s *Stats) AddSent()          { s.m.Lock(); s.sent++; s.m.Unlock() }
+func (s *Stats) AddConfirm()       { s.m.Lock(); s.confirmed++; s.m.Unlock() }
+func (s *Stats) AddBroadcast()     { s.m.Lock(); s.broadcastRecv++; s.m.Unlock() }
+func (s *Stats) AddBroadcastFail() { s.m.Lock(); s.broadcastFail++; s.m.Unlock() }
 
 func (s *Stats) SeqCheck(n int) {
 	s.m.Lock()
@@ -50,6 +52,7 @@ func (s *Stats) Print() {
 	fmt.Printf("Confirmados (ACK):   %d\n", s.confirmed)
 	fmt.Printf("Votos fantasma:      %d\n", s.sent-s.confirmed)
 	fmt.Printf("Broadcasts recebidos:%d\n", s.broadcastRecv)
+	fmt.Printf("Broadcasts perdidos: %d\n", s.broadcastFail)
 	fmt.Printf("Pacotes perdidos:    %d\n", s.lost)
 
 	total := s.broadcastRecv + s.lost
@@ -65,75 +68,135 @@ func fastClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	clientID := fmt.Sprintf("FAST_%d", id)
-	conn, _ := net.Dial("udp", "localhost:9000")
-	if conn == nil { return }
+	conn, err := net.Dial("udp", "localhost:9000")
+	if err != nil {
+		fmt.Printf("[FAST_%d] erro ao conectar\n", id)
+		return
+	}
 	defer conn.Close()
 
+	// Espera ACK de registro antes de votar
+	ackCh := make(chan struct{})
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			var msg Message
+			if json.Unmarshal(buf[:n], &msg) != nil {
+				continue
+			}
+			if msg.Type == "ACK" {
+				ackCh <- struct{}{}
+				return
+			}
+		}
+	}()
 	send(conn, "REGISTER", clientID, "")
-	time.Sleep(80 * time.Millisecond)
+	select {
+	case <-ackCh:
+	case <-time.After(2 * time.Second):
+		fmt.Printf("[FAST_%d] não recebeu ACK de registro\n", id)
+		return
+	}
 
+	time.Sleep(80 * time.Millisecond)
 	stats.AddSent()
 	send(conn, "VOTE", clientID, "A")
 
-	// Lê tudo até expirar — simula cliente ativo
-	go readLoop(conn, stats)
-
-	time.Sleep(10 * time.Second)
+	// Lê broadcasts por 10s
+	broadcasts := make(map[int]bool)
+	end := time.Now().Add(10 * time.Second)
+	buf := make([]byte, 4096)
+	for time.Now().Before(end) {
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		n, err := conn.Read(buf)
+		if err != nil {
+			continue
+		}
+		var msg Message
+		if json.Unmarshal(buf[:n], &msg) != nil {
+			continue
+		}
+		switch msg.Type {
+		case "ACK":
+			if msg.Message == "Voto registrado" {
+				stats.AddConfirm()
+			}
+		case "BROADCAST":
+			stats.AddBroadcast()
+			stats.SeqCheck(msg.SeqNum)
+			broadcasts[msg.SeqNum] = true
+		}
+	}
+	// Checa se recebeu pelo menos 1 broadcast
+	if len(broadcasts) == 0 {
+		stats.AddBroadcastFail()
+		fmt.Printf("[FAST_%d] não recebeu nenhum broadcast!\n", id)
+	}
 }
 
 func slowClient(id int, stats *Stats, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	clientID := fmt.Sprintf("SLOW_%d", id)
-	conn, _ := net.Dial("udp", "localhost:9000")
-	if conn == nil { return }
+	conn, err := net.Dial("udp", "localhost:9000")
+	if err != nil {
+		fmt.Printf("[SLOW_%d] erro ao conectar\n", id)
+		return
+	}
 	defer conn.Close()
 
+	// Espera ACK de registro antes de votar
+	ackCh := make(chan struct{})
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			var msg Message
+			if json.Unmarshal(buf[:n], &msg) != nil {
+				continue
+			}
+			if msg.Type == "ACK" {
+				ackCh <- struct{}{}
+				return
+			}
+		}
+	}()
 	send(conn, "REGISTER", clientID, "")
-	time.Sleep(120 * time.Millisecond)
+	select {
+	case <-ackCh:
+	case <-time.After(2 * time.Second):
+		fmt.Printf("[SLOW_%d] não recebeu ACK de registro\n", id)
+		return
+	}
 
+	time.Sleep(120 * time.Millisecond)
 	stats.AddSent()
 	send(conn, "VOTE", clientID, "B")
 
-	// Lê apenas uma resposta e "morre" => gera perda
+	// Lê apenas uma resposta e "morre"
 	buffer := make([]byte, 2048)
 	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	n, _ := conn.Read(buffer)
-
 	var msg Message
-	if json.Unmarshal(buffer[:n], &msg) == nil && msg.Type == "ACK" {
+	if json.Unmarshal(buffer[:n], &msg) == nil && msg.Type == "ACK" && msg.Message == "Voto registrado" {
 		stats.AddConfirm()
 	}
-
 	fmt.Printf("[SLOW_%d] desconectou (gerando perda)\n", id)
 	time.Sleep(10 * time.Second)
 }
 
-// recebe pacotes e atualiza estatísticas
-func readLoop(conn net.Conn, stats *Stats) {
-	buf := make([]byte, 4096)
-	for {
-		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		n, err := conn.Read(buf)
-		if err != nil { return }
-
-		var msg Message
-		if json.Unmarshal(buf[:n], &msg) != nil { continue }
-
-		switch msg.Type {
-		case "ACK":
-			stats.AddConfirm()
-
-		case "BROADCAST":
-			stats.AddBroadcast()
-			stats.SeqCheck(msg.SeqNum)
-		}
-	}
-}
-
 // envia pacote UDP
 func send(conn net.Conn, t, id, vote string) {
-	data,_ := json.Marshal(Message{Type:t, ClientID:id, VoteOption:vote})
+	data, _ := json.Marshal(Message{Type: t, ClientID: id, VoteOption: vote})
 	conn.Write(data)
 }
 

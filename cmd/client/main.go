@@ -11,61 +11,47 @@ import (
 	"time"
 )
 
-///////////////////////////////////////////////////////////////////////////////
-// ESTRUTURAS DE DADOS
-///////////////////////////////////////////////////////////////////////////////
-
 // Formato JSON trocado com o servidor
 type Message struct {
-	Type       string         `json:"type"`          // REGISTER, VOTE, ACK, ERROR, BROADCAST...
-	ClientID   string         `json:"client_id"`     // nome/ID do cliente
-	VoteOption string         `json:"vote,omitempty"`// opção de voto enviada ao servidor
-	Message    string         `json:"message,omitempty"` // textos de confirmação/erro do servidor
-	VoteCounts map[string]int `json:"vote_counts,omitempty"` // placar recebido no broadcast
-	SeqNum     int            `json:"seq_num,omitempty"`     // número sequencial para detecção de perda
+	Type       string         `json:"type"`
+	ClientID   string         `json:"client_id"`
+	VoteOption string         `json:"vote,omitempty"`
+	Message    string         `json:"message,omitempty"`
+	VoteCounts map[string]int `json:"vote_counts,omitempty"`
+	SeqNum     int            `json:"seq_num,omitempty"`
 }
 
 // Estatísticas locais do cliente (para medir UDP)
 type Stats struct {
 	m sync.Mutex
 
-	sent       int // total de votos enviados
-	confirmed  int // ACK recebidos
-	broadcasts int // quantos broadcasts chegaram
-	lost       int // pacotes perdidos detectados pelo SeqNum
-	lastSeq    int // último número de broadcast recebido
+	sent       int
+	confirmed  int
+	broadcasts int
+	lost       int
+	lastSeq    int
 }
 
-// Métodos simples com travamento para segurança concorrente
-func (s *Stats) addVote()     { s.m.Lock(); s.sent++; s.m.Unlock() }
-func (s *Stats) confirm()     { s.m.Lock(); s.confirmed++; s.m.Unlock() }
-func (s *Stats) addBroadcast(){ s.m.Lock(); s.broadcasts++; s.m.Unlock() }
-
-// Detecta perda de pacotes comparando SeqNum com anterior
+func (s *Stats) addVote()      { s.m.Lock(); s.sent++; s.m.Unlock() }
+func (s *Stats) confirm()      { s.m.Lock(); s.confirmed++; s.m.Unlock() }
+func (s *Stats) addBroadcast() { s.m.Lock(); s.broadcasts++; s.m.Unlock() }
 func (s *Stats) seqCheck(n int) {
 	s.m.Lock()
-
-	// Se o número recebido pulou algum, foram perdidos pacotes
 	if s.lastSeq > 0 && n > s.lastSeq+1 {
 		s.lost += n - s.lastSeq - 1
 	}
 	s.lastSeq = n
-
 	s.m.Unlock()
 }
-
-// Exibe relatório completo
 func (s *Stats) Print() {
 	s.m.Lock()
 	defer s.m.Unlock()
-
 	fmt.Println("\n===== UDP STATS =====")
 	fmt.Println("Votos enviados:", s.sent)
 	fmt.Println("Confirmados   :", s.confirmed)
-	fmt.Println("Não confirm. :", s.sent-s.confirmed)   // diferença = possíveis perdas
+	fmt.Println("Não confirm. :", s.sent-s.confirmed)
 	fmt.Println("Broadcasts   :", s.broadcasts)
 	fmt.Println("Pacotes perd.:", s.lost)
-
 	total := s.broadcasts + s.lost
 	if total > 0 {
 		fmt.Printf("Perda estimada: %.2f%%\n", float64(s.lost)/float64(total)*100)
@@ -73,99 +59,95 @@ func (s *Stats) Print() {
 	fmt.Println("=====================\n")
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// MAIN
-///////////////////////////////////////////////////////////////////////////////
-
 func main() {
-	// Exige nome como argumento
 	if len(os.Args) < 2 {
 		fmt.Println("Uso: go run client.go <nome>")
 		return
 	}
 	name := os.Args[1]
+	if strings.TrimSpace(name) == "" {
+		fmt.Println("Nome de usuário não pode ser vazio")
+		return
+	}
 	stats := &Stats{}
 
-	// Cria conexão UDP com o servidor
-	conn, _ := net.Dial("udp", "localhost:9000")
+	conn, err := net.Dial("udp", "localhost:9000")
+	if err != nil {
+		fmt.Println("Erro ao conectar ao servidor:", err)
+		return
+	}
 	defer conn.Close()
 
-	// Thread paralela que escuta mensagens do servidor
-	go listen(conn, stats)
+	registrado := false
+	ackCh := make(chan struct{})
 
-	// Primeiro passo = registrar o cliente
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+			n, err := conn.Read(buf)
+			if err != nil {
+				continue
+			}
+			var msg Message
+			if json.Unmarshal(buf[:n], &msg) != nil {
+				continue
+			}
+			switch msg.Type {
+			case "ACK":
+				if msg.Message == "Voto registrado" {
+					stats.confirm()
+				}
+				fmt.Printf("\n[OK] %s\n>> ", msg.Message)
+				if !registrado {
+					registrado = true
+					ackCh <- struct{}{}
+				}
+			case "ERROR":
+				fmt.Printf("\n[ERRO] %s\n>> ", msg.Message)
+			case "BROADCAST":
+				stats.addBroadcast()
+				stats.seqCheck(msg.SeqNum)
+				fmt.Printf("\n📡 Parcial #%d %v\n>> ", msg.SeqNum, msg.VoteCounts)
+			}
+		}
+	}()
+
 	send(conn, "REGISTER", name, "")
 	fmt.Println("Conectado. Comandos: VOTE <X> | STATS | QUIT")
 
-	input := bufio.NewScanner(os.Stdin)
+	// Espera ACK de registro antes de permitir votar
+	<-ackCh
 
-	// Loop do terminal do usuário
+	input := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print(">> ")
 		input.Scan()
 		cmd := input.Text()
-
-		// Interpretação dos comandos locais
 		switch {
-		case cmd == "STATS":     // imprime métricas UDP
+		case cmd == "STATS":
 			stats.Print()
-
-		case cmd == "QUIT":      // finalizar cliente
+		case cmd == "QUIT":
 			stats.Print()
 			return
-
 		case strings.HasPrefix(cmd, "VOTE "):
+			if !registrado {
+				fmt.Println("Aguarde registro ser confirmado antes de votar.")
+				continue
+			}
 			option := strings.TrimPrefix(cmd, "VOTE ")
-			stats.addVote()                  // soma tentativa
-			send(conn, "VOTE", name, option) // envia para o servidor
-
+			stats.addVote()
+			send(conn, "VOTE", name, option)
 		default:
 			fmt.Println("Comandos: VOTE <A/B/...>, STATS, QUIT")
 		}
 	}
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// LISTENER: RECEBE MENSAGENS DO SERVIDOR
-///////////////////////////////////////////////////////////////////////////////
-
-func listen(conn net.Conn, stats *Stats) {
-	buf := make([]byte, 4096)
-
-	for {
-		// Define timeout para não travar para sempre
-		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-
-		n, err := conn.Read(buf) // aguarda dado do servidor
-		if err != nil { continue }
-
-		var msg Message
-		if json.Unmarshal(buf[:n], &msg) != nil { continue }
-
-		// Processa pelo tipo
-		switch msg.Type {
-
-		case "ACK": // confirmação de voto/registro
-			stats.confirm()
-			fmt.Printf("\n[OK] %s\n>> ", msg.Message)
-
-		case "ERROR": // erro validado no servidor
-			fmt.Printf("\n[ERRO] %s\n>> ", msg.Message)
-
-		case "BROADCAST": // placar ao vivo
-			stats.addBroadcast()
-			stats.seqCheck(msg.SeqNum) // detecta perda de broadcast
-			fmt.Printf("\n📡 Parcial #%d %v\n>> ", msg.SeqNum, msg.VoteCounts)
-		}
-	}
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// FUNÇÃO PARA ENVIAR MENSAGENS
-///////////////////////////////////////////////////////////////////////////////
-
-// send cria um JSON e envia pelo UDP
 func send(c net.Conn, t, id, opt string) {
-	data,_ := json.Marshal(Message{Type:t, ClientID:id, VoteOption:opt})
-	c.Write(data)
+	data, _ := json.Marshal(Message{Type: t, ClientID: id, VoteOption: opt})
+	_, err := c.Write(data)
+	if err != nil {
+		fmt.Println("Erro ao enviar mensagem:", err)
+	}
 }
